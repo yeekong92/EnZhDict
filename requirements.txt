@@ -1,0 +1,6 @@
+PySide6>=6.6
+pynput>=1.8
+fsrs>=6.0,<7
+requests>=2.31
+edge-tts>=6.1
+deep-translator>=1.11
