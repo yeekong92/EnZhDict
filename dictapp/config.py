@@ -62,7 +62,8 @@ class Settings:
     popup_max_height: int = 420
     font_size: int = 11
     default_accent: str = "us"  # "uk" or "us"
-    auto_play: bool = False
+    auto_play: bool = False         # main window + flashcards
+    popup_auto_play: bool = False   # quick-lookup popup: speak the selected word or sentence
     online_lookups: bool = True
     start_with_windows: bool = False
     show_example_translations: bool = False

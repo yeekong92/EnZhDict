@@ -38,9 +38,12 @@ class SettingsDialog(QDialog):
         self.accent.setCurrentIndex(0 if settings.default_accent == "us" else 1)
         form.addRow("Default accent", self.accent)
 
-        self.auto_play = QCheckBox("Play pronunciation automatically")
+        self.auto_play = QCheckBox("Auto-play pronunciation in the main window and flashcards")
         self.auto_play.setChecked(settings.auto_play)
         form.addRow(self.auto_play)
+        self.popup_auto_play = QCheckBox("Auto-play in the quick-lookup popup (words and sentences)")
+        self.popup_auto_play.setChecked(settings.popup_auto_play)
+        form.addRow(self.popup_auto_play)
         self.online = QCheckBox("Use online lookups (audio, extra definitions, examples, translation)")
         self.online.setChecked(settings.online_lookups)
         form.addRow(self.online)
@@ -67,6 +70,7 @@ class SettingsDialog(QDialog):
             font_size=self.font_size.value(),
             default_accent=self.accent.currentData(),
             auto_play=self.auto_play.isChecked(),
+            popup_auto_play=self.popup_auto_play.isChecked(),
             online_lookups=self.online.isChecked(),
             start_with_windows=self.startup.isChecked(),
             show_tagalog=self.show_tl.isChecked(),

@@ -21,3 +21,7 @@ def is_start_with_os() -> bool:
 
 def make_noactivate(win_id: int) -> None:
     pass
+
+
+def allow_foreground_handoff() -> None:
+    pass

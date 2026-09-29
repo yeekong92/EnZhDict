@@ -214,3 +214,13 @@ def make_noactivate(win_id: int) -> None:
     hwnd = wt.HWND(int(win_id))
     style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+
+
+def allow_foreground_handoff() -> None:
+    """Let another process (the already-running instance) take the foreground.
+
+    Windows only lets the process the user just launched bring a window to the
+    front; without this, the first instance's window would just flash in the taskbar.
+    """
+    ASFW_ANY = -1
+    user32.AllowSetForegroundWindow(ASFW_ANY)

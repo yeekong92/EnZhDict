@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from urllib.parse import unquote
 
-from PySide6.QtCore import QStringListModel, Qt, QTimer, QUrl
+from PySide6.QtCore import QStringListModel, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
@@ -30,6 +30,8 @@ class ResultView(QTextBrowser):
 
 
 class MainWindow(QMainWindow):
+    settings_requested = Signal()
+
     def __init__(self, ctx: AppContext):
         super().__init__()
         self.ctx = ctx
@@ -82,16 +84,39 @@ class MainWindow(QMainWindow):
         self.lang_box.currentIndexChanged.connect(self._lang_changed)
         bar.addWidget(self.lang_box)
         bar.addWidget(go)
-        bar.addWidget(self.save_btn)
+        settings_btn = QPushButton("⚙ Settings")
+        settings_btn.setToolTip("Settings (Ctrl+,)")
+        settings_btn.clicked.connect(self.settings_requested)
+        bar.addWidget(settings_btn)
 
-        # --- header (headword, phonetics)
-        self.header = QLabel()
-        self.header.setTextFormat(Qt.RichText)
-        self.header.setWordWrap(True)
-        self.header.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self.header.setOpenExternalLinks(False)
-        self.header.linkActivated.connect(self._link)
-        self.header.setContentsMargins(4, 6, 4, 2)
+        # --- header: headword / [pronunciation  ☆ Save] / notes
+        def rich_label() -> QLabel:
+            lbl = QLabel()
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setWordWrap(True)
+            lbl.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            lbl.setOpenExternalLinks(False)
+            lbl.linkActivated.connect(self._link)
+            return lbl
+
+        self.title_lbl = rich_label()
+        self.phon_lbl = rich_label()
+        self.phon_lbl.setWordWrap(False)
+        self.extra_lbl = rich_label()
+        phon_row = QHBoxLayout()
+        phon_row.setContentsMargins(0, 0, 0, 0)
+        phon_row.addWidget(self.phon_lbl)
+        phon_row.addSpacing(12)
+        phon_row.addWidget(self.save_btn)
+        phon_row.addStretch()
+        self.save_btn.hide()
+        header = QVBoxLayout()
+        header.setContentsMargins(4, 6, 4, 2)
+        header.setSpacing(2)
+        header.addWidget(self.title_lbl)
+        header.addLayout(phon_row)
+        header.addWidget(self.extra_lbl)
+        self.extra_lbl.hide()
 
         # --- tabs
         self.tabs = QTabWidget()
@@ -121,7 +146,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         lay = QVBoxLayout(central)
         lay.addLayout(bar)
-        lay.addWidget(self.header)
+        lay.addLayout(header)
         lay.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.statusBar()
@@ -130,6 +155,7 @@ class MainWindow(QMainWindow):
         ctx.settings_changed.connect(self.apply_font)
 
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self.focus_search)
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self.settings_requested)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_current)
         QShortcut(QKeySequence("Alt+Left"), self, activated=lambda: self._step_history(-1))
         QShortcut(QKeySequence("Alt+Right"), self, activated=lambda: self._step_history(1))
@@ -213,11 +239,17 @@ class MainWindow(QMainWindow):
     def _show_result(self, res: LookupResult) -> None:
         self.result = res
         pending = self._busy
-        self.header.setText(render.header_html(res))
+        title, phon, extra = render.header_parts(res, self.ctx.settings.default_accent)
+        self.title_lbl.setText(title)
+        self.phon_lbl.setText(phon)
+        self.phon_lbl.setVisible(bool(phon))
+        self.save_btn.setVisible(bool(res.query))
+        self.extra_lbl.setText(extra)
+        self.extra_lbl.setVisible(bool(extra))
         self.en_view.setHtml(render.english_html(res, pending))
         self.zh_view.setHtml(render.chinese_html(res, pending))
         self.tl_view.setHtml(render.tagalog_html(res, pending))
-        self.ex_view.setHtml(render.examples_html(res, self.ex_toggle.isChecked(), pending))
+        self.ex_view.setHtml(render.examples_html(res, self.ex_toggle.isChecked(), pending, self._guide))
         self.tabs.setTabText(TAB_EX, f"Examples ({len(res.examples)})" if res.examples else "Examples")
         self.save_btn.setEnabled(bool(res.query))
         self._refresh_save_button()
@@ -251,7 +283,7 @@ class MainWindow(QMainWindow):
                 self._translating_for = self.result.query
                 self.session.translate_examples()
         if self.result:
-            self.ex_view.setHtml(render.examples_html(self.result, on, self._busy))
+            self.ex_view.setHtml(render.examples_html(self.result, on, self._busy, self._guide))
 
     def _update_suggestions(self) -> None:
         if self.ctx.dictionary is None:
@@ -272,9 +304,16 @@ class MainWindow(QMainWindow):
     def _update_due(self, n: int) -> None:
         self.tabs.setTabText(TAB_SAVED, f"Saved · {n} due" if n else "Saved")
 
+    def _guide(self, text: str, lang: str) -> str:
+        return self.ctx.dictionary.pronunciation_guide(text, lang) if self.ctx.dictionary else ""
+
     def _link(self, href: str) -> None:
         if href.startswith("play:"):
             self._play(href[5:])
+        elif href.startswith("say:"):
+            lang, _, text = href[4:].partition(":")
+            accent = lang if lang in ("zh", "tl") else self.ctx.settings.default_accent
+            self.ctx.audio.play(unquote(text), accent)
         elif href.startswith("lookup:"):
             self.lookup(unquote(href[7:]))
         elif href.startswith("lookupas:"):

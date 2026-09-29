@@ -142,3 +142,13 @@ def test_real_dictionary_fast():
     for w in ("apple", "went", "ubiquitous", "银行", "running"):
         assert d.lookup(w).found, w
     assert (time.perf_counter() - t) < 0.3  # well within the 300 ms popup budget
+
+
+def test_pronunciation_guide_english(mini_dict):
+    # Known words get IPA, unknown ones are kept as written.
+    assert mini_dict.pronunciation_guide("Apple, go!", "en") == "/ˈæpl gəu/"
+    assert mini_dict.pronunciation_guide("Blorp apple", "en") == "/blorp ˈæpl/"
+
+
+def test_pronunciation_guide_chinese(mini_dict):
+    assert mini_dict.pronunciation_guide("我喜欢中文了。", "zh") == "wǒ xǐ huan Zhōng wén le"

@@ -62,6 +62,7 @@ class DictionaryApp(QObject):
         qapp.setWindowIcon(self.icon)
 
         self.window = MainWindow(self.ctx)
+        self.window.settings_requested.connect(self.open_settings)
         self.popup = Popup(self.ctx)
         self.popup.open_in_main.connect(self.window.lookup_and_show)
         self.ctx.settings_changed.connect(self._on_settings_changed)
@@ -181,6 +182,8 @@ def _single_instance(qapp: QApplication) -> QLocalServer | None:
     sock = QLocalSocket()
     sock.connectToServer(SERVER_NAME)
     if sock.waitForConnected(300):
+        log.info("EnZhDict is already running; bringing that window to the front")
+        plat.allow_foreground_handoff()
         sock.write(b"show")
         sock.waitForBytesWritten(300)
         sock.disconnectFromServer()
@@ -213,8 +216,12 @@ def run(argv: list[str]) -> int:
     app = DictionaryApp(qapp, start_hidden="--tray" in argv)
 
     def on_connection():
-        conn = server.nextPendingConnection()
-        conn.readyRead.connect(lambda: (conn.readAll(), app.activate_from_other_instance()))
+        # Any connection means "another launch happened": show the window. (Waiting for
+        # readyRead is racy — the bytes may already have arrived before we connect to it.)
+        while (conn := server.nextPendingConnection()) is not None:
+            conn.disconnected.connect(conn.deleteLater)
+        log.info("another launch detected; showing the main window")
+        app.activate_from_other_instance()
 
     server.newConnection.connect(on_connection)
     if "--selftest" in argv:

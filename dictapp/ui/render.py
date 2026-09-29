@@ -65,25 +65,36 @@ def phonetics_html(res: LookupResult, compact: bool = False) -> str:
     return ("&nbsp;&nbsp;&nbsp;" if compact else "&nbsp;&nbsp;&nbsp;&nbsp;").join(parts)
 
 
-def header_html(res: LookupResult) -> str:
+def header_parts(res: LookupResult, accent: str = "us") -> tuple[str, str, str]:
+    """(title, pronunciation line, extra notes) for the main window header.
+
+    The pronunciation line sits next to the Save button, so sentences get a
+    "Listen" link there too. `accent` is the default English accent for sentences.
+    """
     c = colors()
     head = escape(res.headword or res.query)
-    out = [f'<span style="font-size:20pt;font-weight:600">{head}</span>']
+    title = [f'<span style="font-size:20pt;font-weight:600">{head}</span>']
     if res.language == "tl":
-        out.append(f' <span style="color:{c["tl"]};font-size:9pt">&nbsp;Tagalog</span>')
+        title.append(f' <span style="color:{c["tl"]};font-size:9pt">&nbsp;Tagalog</span>')
     if res.kind == "word" and res.zh_entries and res.zh_entries[0].trad != res.zh_entries[0].simp:
-        out.append(f'<span style="color:{c["muted"]};font-size:13pt"> ({escape(res.zh_entries[0].trad)})</span>')
+        title.append(f'<span style="color:{c["muted"]};font-size:13pt"> ({escape(res.zh_entries[0].trad)})</span>')
     for tag in res.tags:
-        out.append(f' <span style="background:{c["tag_bg"]};font-size:8pt">&nbsp;{escape(tag)}&nbsp;</span>')
-    ph = phonetics_html(res)
-    if ph:
-        out.append(f"<br>{ph}")
+        title.append(f' <span style="background:{c["tag_bg"]};font-size:8pt">&nbsp;{escape(tag)}&nbsp;</span>')
+
+    phon = phonetics_html(res)
+    if not phon and res.query and res.language in ("en", "zh", "tl"):
+        acc = res.language if res.language in ("zh", "tl") else accent
+        phon = f'<a href="play:{acc}" style="color:{c["accent"]};text-decoration:none">🔊 Listen</a>'
+
+    extra = []
     if res.inflection:
         link = _lookup_as(res.language, res.lemma) if res.language == "tl" else _lookup_link(res.lemma)
-        out.append(f'<br><span style="color:{c["muted"]}">{escape(res.inflection.split(" of ")[0])} of </span>'
-                   + link)
-    out.append(alt_hint_html(res))
-    return "".join(out)
+        extra.append(f'<span style="color:{c["muted"]}">{escape(res.inflection.split(" of ")[0])} of </span>'
+                     + link)
+    hint = alt_hint_html(res).removeprefix("<br>")
+    if hint:
+        extra.append(hint)
+    return "".join(title), phon, "<br>".join(extra)
 
 
 def alt_hint_html(res: LookupResult) -> str:
@@ -255,7 +266,30 @@ def gloss_html(res: LookupResult) -> str:
     return "".join(rows)
 
 
-def examples_html(res: LookupResult, show_zh: bool, pending: bool = False) -> str:
+def _say_link(text: str, lang: str) -> str:
+    c = colors()
+    return (f'<a href="say:{lang}:{quote(text)}" style="color:{c["accent"]};text-decoration:none"'
+            f' title="Listen">🔊</a>&nbsp;')
+
+
+def _example_line(text_html: str, raw: str, lang: str, guide, color: str = "") -> str:
+    """One sentence with its 🔊 button and pronunciation guide underneath."""
+    c = colors()
+    style = f' style="color:{color}"' if color else ""
+    line = f"{_say_link(raw, lang)}<span{style}>{text_html}</span>"
+    g = guide(raw, lang) if guide else ""
+    if g:
+        line += f'<br><span style="color:{c["muted"]};font-size:9pt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{escape(g)}</span>'
+    return line
+
+
+def examples_html(res: LookupResult, show_zh: bool, pending: bool = False,
+                  guide=None) -> str:
+    """Example sentences, each with a 🔊 button and a pronunciation guide.
+
+    `guide(text, lang)` returns IPA (en/tl) or pinyin (zh) for a sentence.
+    `show_zh` toggles the translations (Chinese for English words, English otherwise).
+    """
     c = colors()
     if not res.examples:
         if res.kind != "word":
@@ -266,32 +300,24 @@ def examples_html(res: LookupResult, show_zh: bool, pending: bool = False) -> st
             return _message(f"No examples available offline. ({res.online_error})")
         return _message("No example sentences found.")
     out = []
-    word = (res.headword or res.query).lower()
-    if res.language == "tl":
-        word = res.query.lower()
-        for ex in res.examples:
-            tl = _bold(escape(ex.tl or ""), escape(word))
-            en = f'<br><span style="color:{c["muted"]}">{escape(ex.en)}</span>' if show_zh else ""
-            out.append(f'<li style="margin-bottom:8px">{tl}{en}</li>')
-        return "<ul>" + "".join(out) + "</ul>"
+    word = escape((res.query if res.language == "tl" else res.headword or res.query).lower())
     for ex in res.examples:
-        en = escape(ex.en)
-        if res.language == "en" and word:
-            # Bold the headword where it occurs (simple, case-insensitive).
-            lower, i, parts = en.lower(), 0, []
-            w = escape(word)
-            while (j := lower.find(w, i)) >= 0:
-                parts += [en[i:j], f"<b>{en[j:j + len(w)]}</b>"]
-                i = j + len(w)
-            en = "".join(parts) + en[i:]
-        zh = ""
-        if show_zh or res.language == "zh":
-            if ex.zh:
-                zh = f'<br><span style="color:{c["zh"]}">{escape(ex.zh)}</span>'
-            elif show_zh:
-                zh = f'<br><span style="color:{c["muted"]}">(translating…)</span>'
-        out.append(f'<li style="margin-bottom:8px">{en}{zh}</li>')
-    return "<ul>" + "".join(out) + "</ul>"
+        if res.language == "tl":
+            main = _example_line(_bold(escape(ex.tl or ""), word), ex.tl or "", "tl", guide)
+            trans = _example_line(escape(ex.en), ex.en, "en", guide, c["muted"]) if show_zh else ""
+        elif res.language == "zh":
+            # Chinese headword: the Chinese sentence is primary, English is the translation.
+            main = _example_line(_bold(escape(ex.zh or ""), word), ex.zh or "", "zh", guide) if ex.zh else ""
+            trans = _example_line(escape(ex.en), ex.en, "en", guide, c["muted"]) if show_zh or not ex.zh else ""
+        else:
+            main = _example_line(_bold(escape(ex.en), word), ex.en, "en", guide)
+            trans = ""
+            if show_zh:
+                trans = (_example_line(escape(ex.zh), ex.zh, "zh", guide, c["zh"]) if ex.zh else
+                         f'<span style="color:{c["muted"]}">(translating…)</span>')
+        body = "<br>".join(x for x in (main, trans) if x)
+        out.append(f'<p style="margin:0 0 12px 0">{body}</p>')
+    return "".join(out)
 
 
 def _bold(html_text: str, word: str) -> str:

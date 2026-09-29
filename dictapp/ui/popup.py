@@ -122,7 +122,7 @@ class Popup(QWidget):
         self.raise_()
         self._watch.start()
         self._start_mouse_listener()
-        if self.ctx.settings.auto_play and res.kind == "word" and res.found:
+        if self.ctx.settings.popup_auto_play and res.query and res.language in ("en", "zh", "tl"):
             self._play(res.language if res.language in ("zh", "tl") else self.ctx.settings.default_accent)
 
     def show_message(self, text: str) -> None:
@@ -225,8 +225,9 @@ class Popup(QWidget):
     def _play(self, accent: str) -> None:
         res = self.result
         if res:
+            text = (res.headword or res.query) if res.kind == "word" and res.found else res.query
             url = {"uk": res.audio_uk, "us": res.audio_us}.get(accent, "")
-            self.ctx.audio.play(res.headword or res.query, accent, url)
+            self.ctx.audio.play(text[:400], accent, url)
 
     def _save(self) -> None:
         if self.result and self.result.query:

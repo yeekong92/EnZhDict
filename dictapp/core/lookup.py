@@ -36,6 +36,11 @@ _TL_MORPH = re.compile(r"^(nag|mag|pag|naka|maka|nakaka|ipag|pinag|pinaka|mang|n
                        r"|^\w{2,}(han|hin)$|^(\w)([aeiou])\3\4")
 _TL_SHOW_TAGS = {"obsolete", "archaic", "rare", "uncommon", "dated", "slang", "colloquial",
                  "informal", "formal", "figuratively", "idiomatic", "vulgar", "derogatory"}
+# Single characters whose most common reading in running text is the particle one,
+# not CC-CEDICT's first listed reading (了 le, not liǎo).
+_PARTICLE_PINYIN = {"了": "le", "的": "de", "地": "de", "得": "de", "着": "zhe", "么": "me",
+                    "吗": "ma", "呢": "ne", "吧": "ba", "啊": "a", "过": "guo", "们": "men",
+                    "个": "gè", "子": "zi"}
 _TAG_NAMES = {"zk": "中考", "gk": "高考", "cet4": "CET-4", "cet6": "CET-6",
               "ky": "考研", "toefl": "TOEFL", "ielts": "IELTS", "gre": "GRE"}
 
@@ -104,6 +109,7 @@ class Dictionary:
         self._con = sqlite3.connect(uri, uri=True, check_same_thread=False)
         self._lock = threading.Lock()
         self._t2s: dict[str, str] | None = None
+        self._guide_cache: dict[tuple[str, str], str] = {}
         self.has_tagalog = bool(self._q(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tagalog'"))
 
@@ -310,6 +316,46 @@ class Dictionary:
                 t2s.setdefault(t, s_)
             self._t2s = t2s
         return "".join(self._t2s.get(ch, ch) for ch in text)
+
+    def pronunciation_guide(self, text: str, lang: str) -> str:
+        """Word-by-word pronunciation for a sentence: IPA for English/Tagalog,
+        pinyin for Chinese. Words with no known pronunciation are left as-is."""
+        key = (text, lang)
+        if key in self._guide_cache:
+            return self._guide_cache[key]
+        if lang == "zh":
+            parts = []
+            for tok, entry in self.segment_zh(text):
+                if tok in _PARTICLE_PINYIN:
+                    parts.append(_PARTICLE_PINYIN[tok])
+                elif entry:
+                    parts.append(entry.pinyin)
+                elif any(ch.isalnum() and not is_cjk(ch) for ch in tok):
+                    parts.append(tok.strip())  # Latin words / numbers inside Chinese text
+            out = " ".join(p for p in parts if p)
+        else:
+            parts = []
+            for w in latin_words(text):
+                ipa = self._word_ipa(w, lang)
+                parts.append(ipa or w)
+            out = "/" + " ".join(parts) + "/" if parts else ""
+        if len(self._guide_cache) > 4000:
+            self._guide_cache.clear()
+        self._guide_cache[key] = out
+        return out
+
+    def _word_ipa(self, word: str, lang: str) -> str:
+        if lang == "tl":
+            if not self.has_tagalog:
+                return ""
+            plain = _strip_accents(word)
+            rows = self._q("SELECT ipa FROM tagalog WHERE word = ? COLLATE NOCASE AND ipa != '' "
+                           "ORDER BY rowid LIMIT 1", (plain,))
+            return rows[0][0] if rows else ""
+        w = word.replace("’", "'")
+        rows = self._q("SELECT phonetic FROM ecdict WHERE word = ? COLLATE NOCASE AND phonetic != '' "
+                       "ORDER BY (word = ?) DESC LIMIT 1", (w, w.lower()))
+        return fix_ipa(rows[0][0]) if rows else ""
 
     def suggest(self, prefix: str, limit: int = 12, lang: str | None = None) -> list[str]:
         prefix = normalize_query(prefix)
