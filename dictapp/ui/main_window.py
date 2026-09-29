@@ -6,7 +6,7 @@ from urllib.parse import unquote
 from PySide6.QtCore import QStringListModel, Qt, QTimer, QUrl
 from PySide6.QtGui import QCloseEvent, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
+    QCheckBox, QComboBox, QCompleter, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
     QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -15,7 +15,8 @@ from . import render
 from .context import AppContext, LookupSession
 from .saved_tab import SavedTab
 
-TAB_EN, TAB_ZH, TAB_EX, TAB_SAVED = range(4)
+TAB_EN, TAB_ZH, TAB_TL, TAB_EX, TAB_SAVED = range(5)
+LANG_CHOICES = [("Auto", None), ("EN", "en"), ("中文", "zh"), ("TL", "tl")]
 
 
 class ResultView(QTextBrowser):
@@ -39,7 +40,7 @@ class MainWindow(QMainWindow):
         self.session.busy.connect(self._set_busy)
         self.result: LookupResult | None = None
         self._busy = False
-        self._history: list[str] = []
+        self._history: list[tuple[str, str | None]] = []  # (text, forced language)
         self._hist_pos = -1
         self._translating_for = ""
 
@@ -74,6 +75,12 @@ class MainWindow(QMainWindow):
         for w in (self.back_btn, self.fwd_btn):
             bar.addWidget(w)
         bar.addWidget(self.search, 1)
+        self.lang_box = QComboBox()
+        self.lang_box.setToolTip("Input language: Auto-detect, or force English / Chinese / Tagalog")
+        for label, code in LANG_CHOICES:
+            self.lang_box.addItem(label, code)
+        self.lang_box.currentIndexChanged.connect(self._lang_changed)
+        bar.addWidget(self.lang_box)
         bar.addWidget(go)
         bar.addWidget(self.save_btn)
 
@@ -90,11 +97,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.en_view = ResultView(self._link)
         self.zh_view = ResultView(self._link)
+        self.tl_view = ResultView(self._link)
         self.ex_view = ResultView(self._link)
         ex_page = QWidget()
         ex_lay = QVBoxLayout(ex_page)
         ex_lay.setContentsMargins(0, 4, 0, 0)
-        self.ex_toggle = QCheckBox("Show Chinese translations")
+        self.ex_toggle = QCheckBox("Show translations")
         self.ex_toggle.setChecked(ctx.settings.show_example_translations)
         self.ex_toggle.toggled.connect(self._toggle_example_zh)
         ex_lay.addWidget(self.ex_toggle)
@@ -104,6 +112,8 @@ class MainWindow(QMainWindow):
         self.saved.due_count_changed.connect(self._update_due)
         self.tabs.addTab(self.en_view, "English")
         self.tabs.addTab(self.zh_view, "中文 Chinese")
+        self.tabs.addTab(self.tl_view, "Tagalog")
+        self.tabs.currentChanged.connect(self._tab_changed)
         self.tabs.addTab(ex_page, "Examples")
         self.tabs.addTab(self.saved, "Saved")
         self._update_due(ctx.srs.due_count())
@@ -138,33 +148,41 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def lookup_and_show(self, text: str) -> None:
+    def lookup_and_show(self, text: str, lang: str | None = None) -> None:
         self.show_and_raise()
-        self.lookup(text)
+        self.lookup(text, lang=lang)
 
-    def lookup(self, text: str, record: bool = True) -> None:
+    def lookup(self, text: str, record: bool = True, lang: str | None = None) -> None:
+        """Look up `text`. `lang` forces a language for this lookup only; otherwise
+        the EN/中文/TL selector applies (Auto = detect)."""
         text = text.strip()
         if not text:
             return
+        lang = lang or self.lang_box.currentData()
         if self.ctx.dict_error:
             self.statusBar().showMessage(self.ctx.dict_error)
         if record:
             del self._history[self._hist_pos + 1:]
-            if not self._history or self._history[-1] != text:
-                self._history.append(text)
+            if not self._history or self._history[-1] != (text, lang):
+                self._history.append((text, lang))
             self._hist_pos = len(self._history) - 1
             self._update_history_buttons()
         self.search.setText(text)
         self.search.completer().popup().hide()
         if self.tabs.currentIndex() == TAB_SAVED:
             self.tabs.setCurrentIndex(TAB_EN)
-        res = self.session.start(text)
-        if res.language == "zh" and self.tabs.currentIndex() == TAB_EN and res.kind == "sentence":
+        res = self.session.start(text, lang)
+        tab = self.tabs.currentIndex()
+        if res.kind == "sentence" and tab == TAB_EN and res.language in ("zh", "en"):
             self.tabs.setCurrentIndex(TAB_ZH)
-        elif res.language == "en" and res.kind == "sentence" and self.tabs.currentIndex() == TAB_EN:
+        elif res.language == "tl" and tab == TAB_ZH:
+            self.tabs.setCurrentIndex(TAB_EN)
+        elif res.language == "zh" and tab == TAB_TL:
             self.tabs.setCurrentIndex(TAB_ZH)
+        if self.tabs.currentIndex() == TAB_TL:
+            self.session.ensure_tagalog()
         if res.found and res.kind == "word" and self.ctx.settings.auto_play:
-            self._play("zh" if res.language == "zh" else self.ctx.settings.default_accent)
+            self._play(res.language if res.language in ("zh", "tl") else self.ctx.settings.default_accent)
 
     def save_current(self) -> None:
         res = self.result
@@ -177,7 +195,7 @@ class MainWindow(QMainWindow):
     def apply_font(self) -> None:
         f = QFont(self.font())
         f.setPointSize(self.ctx.settings.font_size)
-        for v in (self.en_view, self.zh_view, self.ex_view):
+        for v in (self.en_view, self.zh_view, self.tl_view, self.ex_view):
             v.setFont(f)
         if self.result:
             self._show_result(self.result)
@@ -198,6 +216,7 @@ class MainWindow(QMainWindow):
         self.header.setText(render.header_html(res))
         self.en_view.setHtml(render.english_html(res, pending))
         self.zh_view.setHtml(render.chinese_html(res, pending))
+        self.tl_view.setHtml(render.tagalog_html(res, pending))
         self.ex_view.setHtml(render.examples_html(res, self.ex_toggle.isChecked(), pending))
         self.tabs.setTabText(TAB_EX, f"Examples ({len(res.examples)})" if res.examples else "Examples")
         self.save_btn.setEnabled(bool(res.query))
@@ -208,9 +227,11 @@ class MainWindow(QMainWindow):
             self._toggle_example_zh(True)
 
     def _set_busy(self, busy: bool) -> None:
-        self._busy = busy
+        was_busy, self._busy = self._busy, busy
         if busy:
             self.statusBar().showMessage("Loading online data…")
+            if not was_busy and self.result:
+                self._show_result(self.result)  # swap "No translation" for "Translating…"
         else:
             if self.statusBar().currentMessage() == "Loading online data…":
                 self.statusBar().clearMessage()
@@ -236,7 +257,17 @@ class MainWindow(QMainWindow):
         if self.ctx.dictionary is None:
             return
         text = self.search.text()
-        self._completion.setStringList(self.ctx.dictionary.suggest(text) if len(text.strip()) >= 2 else [])
+        lang = self.lang_box.currentData()
+        self._completion.setStringList(
+            self.ctx.dictionary.suggest(text, lang=lang) if len(text.strip()) >= 2 else [])
+
+    def _lang_changed(self) -> None:
+        if self.search.text().strip():
+            self.lookup(self.search.text())
+
+    def _tab_changed(self, index: int) -> None:
+        if index == TAB_TL:
+            self.session.ensure_tagalog()
 
     def _update_due(self, n: int) -> None:
         self.tabs.setTabText(TAB_SAVED, f"Saved · {n} due" if n else "Saved")
@@ -246,6 +277,9 @@ class MainWindow(QMainWindow):
             self._play(href[5:])
         elif href.startswith("lookup:"):
             self.lookup(unquote(href[7:]))
+        elif href.startswith("lookupas:"):
+            lang, _, word = href[9:].partition(":")
+            self.lookup(unquote(word), lang=lang)
         elif href.startswith("http"):
             from PySide6.QtGui import QDesktopServices
             QDesktopServices.openUrl(QUrl(href))
@@ -263,7 +297,8 @@ class MainWindow(QMainWindow):
         if 0 <= pos < len(self._history):
             self._hist_pos = pos
             self._update_history_buttons()
-            self.lookup(self._history[pos], record=False)
+            text, lang = self._history[pos]
+            self.lookup(text, record=False, lang=lang)
 
     def _update_history_buttons(self) -> None:
         self.back_btn.setEnabled(self._hist_pos > 0)

@@ -229,6 +229,8 @@ def _selftest(app: DictionaryApp) -> None:
     res = app.ctx.offline_lookup("ubiquitous")
     log.info("selftest: lookup found=%s zh=%s in %.1f ms", res.found, res.short_zh(1),
              (time.perf_counter() - t) * 1000)
+    res = app.ctx.offline_lookup("kumain")
+    log.info("selftest: tagalog lookup lang=%s found=%s en=%s", res.language, res.found, res.short_en(1))
     from PySide6.QtMultimedia import QMediaDevices
     log.info("selftest: audio outputs=%s", [d.description() for d in QMediaDevices.audioOutputs()])
     try:

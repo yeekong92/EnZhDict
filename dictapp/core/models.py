@@ -14,6 +14,7 @@ class Sense:
 class Example:
     en: str
     zh: str | None = None
+    tl: str | None = None         # Tagalog sentence (for Tagalog lookups `en` is its translation)
 
 
 @dataclass
@@ -26,9 +27,22 @@ class ZhEntry:
 
 
 @dataclass
+class TlEntry:
+    """A Wiktionary Tagalog entry (one part of speech)."""
+    word: str
+    canonical: str                # with stress accents, e.g. "baháy"
+    pos: str
+    ipa: str
+    senses: list[tuple[str, list[str]]]      # (English gloss, tags)
+    examples: list[tuple[str, str]] = field(default_factory=list)  # (Tagalog, English)
+    lemma: str = ""
+    lemma_note: str = ""
+
+
+@dataclass
 class LookupResult:
     query: str
-    language: str                 # "en" / "zh"
+    language: str                 # "en" / "zh" / "tl"
     kind: str                     # "word" / "sentence"
     found: bool = False
     headword: str = ""
@@ -37,6 +51,8 @@ class LookupResult:
     senses_en: list[Sense] = field(default_factory=list)       # English definitions by POS
     meanings_zh: list[tuple[str, str]] = field(default_factory=list)  # (pos, Chinese text)
     zh_entries: list[ZhEntry] = field(default_factory=list)   # Chinese headword entries
+    tl_entries: list[TlEntry] = field(default_factory=list)   # Tagalog headword entries
+    meanings_tl: list[tuple[str, str]] = field(default_factory=list)  # English word -> (Tagalog word, gloss)
     examples: list[Example] = field(default_factory=list)
     audio_uk: str = ""            # URL or local path
     audio_us: str = ""
@@ -47,6 +63,10 @@ class LookupResult:
     translation: str = ""         # sentence translation
     translation_engine: str = ""
     translation_error: str = ""
+    translation_tl: str = ""      # English -> Tagalog machine translation (fetched on demand)
+    translation_tl_error: str = ""
+    alt_lang: str = ""            # the text is also a word in this other language...
+    alt_summary: str = ""         # ...meaning this (shown as a hint with a link)
     gloss: list[tuple[str, str, str]] = field(default_factory=list)  # zh sentence: (token, pinyin, meaning)
     suggestions: list[str] = field(default_factory=list)             # "did you mean"
     online_loaded: bool = False
@@ -83,6 +103,18 @@ class LookupResult:
                     break
         return out[:n]
 
+    @property
+    def ipa(self) -> str:
+        """Tagalog IPA (English uses phonetic_uk / phonetic_us)."""
+        return next((e.ipa for e in self.tl_entries if e.ipa), "")
+
+    def short_tl(self, n: int = 3) -> list[str]:
+        words = list(dict.fromkeys(w for w, _ in self.meanings_tl))
+        return words[:n]
+
+    def meaning_tl_text(self) -> str:
+        return "; ".join(self.short_tl(6)) or self.translation_tl
+
     def short_zh(self, n: int = 3) -> list[str]:
         return [f"{pos} {txt}".strip() for pos, txt in self.meanings_zh[:n]]
 
@@ -105,6 +137,8 @@ class LookupResult:
         d = dict(d)
         d["senses_en"] = [Sense(**s) for s in d.get("senses_en", [])]
         d["zh_entries"] = [ZhEntry(**e) for e in d.get("zh_entries", [])]
+        d["tl_entries"] = [TlEntry(**e) for e in d.get("tl_entries", [])]
+        d["meanings_tl"] = [tuple(m) for m in d.get("meanings_tl", [])]
         d["examples"] = [Example(**e) for e in d.get("examples", [])]
         d["meanings_zh"] = [tuple(m) for m in d.get("meanings_zh", [])]
         d["gloss"] = [tuple(g) for g in d.get("gloss", [])]

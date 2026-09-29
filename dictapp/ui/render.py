@@ -1,8 +1,9 @@
 """HTML rendering of lookup results for QTextBrowser / QLabel.
 
 Links use custom schemes handled by the widgets:
-  play:uk / play:us / play:zh   pronounce the headword
-  lookup:<text>                 look up another word
+  play:uk / play:us / play:zh / play:tl   pronounce the headword
+  lookup:<text>                           look up another word (auto-detect language)
+  lookupas:<en|tl>:<text>                 look up, forcing English or Tagalog
 """
 from __future__ import annotations
 
@@ -26,12 +27,22 @@ def colors() -> dict[str, str]:
         "pos": "#f28b82" if dark else "#b3261e",
         "tag_bg": "#3c4043" if dark else "#e8eaed",
         "zh": "#81c995" if dark else "#137333",
+        "tl": "#fcad70" if dark else "#b55d00",
     }
+
+
+LANG_NAMES = {"en": "English", "zh": "Chinese", "tl": "Tagalog"}
 
 
 def _lookup_link(word: str, label: str | None = None) -> str:
     c = colors()
     return (f'<a href="lookup:{quote(word)}" style="color:{c["accent"]};text-decoration:none">'
+            f'{escape(label or word)}</a>')
+
+
+def _lookup_as(lang: str, word: str, label: str | None = None) -> str:
+    c = colors()
+    return (f'<a href="lookupas:{lang}:{quote(word)}" style="color:{c["accent"]};text-decoration:none">'
             f'{escape(label or word)}</a>')
 
 
@@ -47,6 +58,10 @@ def phonetics_html(res: LookupResult, compact: bool = False) -> str:
     elif res.language == "zh" and res.kind == "word" and res.found:
         parts.append(f'<a href="play:zh" style="color:{c["accent"]};text-decoration:none">🔊</a> '
                      f'<span style="color:{c["zh"]}">{escape(res.pinyin)}</span>')
+    elif res.language == "tl" and res.kind == "word" and res.found:
+        ipa = f" /{escape(res.ipa)}/" if res.ipa else ""
+        parts.append(f'<a href="play:tl" style="color:{c["accent"]};text-decoration:none">🔊</a>'
+                     f'<span style="color:{c["muted"]}">{ipa}</span>')
     return ("&nbsp;&nbsp;&nbsp;" if compact else "&nbsp;&nbsp;&nbsp;&nbsp;").join(parts)
 
 
@@ -54,6 +69,8 @@ def header_html(res: LookupResult) -> str:
     c = colors()
     head = escape(res.headword or res.query)
     out = [f'<span style="font-size:20pt;font-weight:600">{head}</span>']
+    if res.language == "tl":
+        out.append(f' <span style="color:{c["tl"]};font-size:9pt">&nbsp;Tagalog</span>')
     if res.kind == "word" and res.zh_entries and res.zh_entries[0].trad != res.zh_entries[0].simp:
         out.append(f'<span style="color:{c["muted"]};font-size:13pt"> ({escape(res.zh_entries[0].trad)})</span>')
     for tag in res.tags:
@@ -62,9 +79,24 @@ def header_html(res: LookupResult) -> str:
     if ph:
         out.append(f"<br>{ph}")
     if res.inflection:
+        link = _lookup_as(res.language, res.lemma) if res.language == "tl" else _lookup_link(res.lemma)
         out.append(f'<br><span style="color:{c["muted"]}">{escape(res.inflection.split(" of ")[0])} of </span>'
-                   + _lookup_link(res.lemma))
+                   + link)
+    out.append(alt_hint_html(res))
     return "".join(out)
+
+
+def alt_hint_html(res: LookupResult) -> str:
+    """'Also a Tagalog word: …' when the spelling exists in the other Latin-script language."""
+    if not res.alt_lang:
+        return ""
+    c = colors()
+    summary = res.alt_summary if len(res.alt_summary) < 70 else res.alt_summary[:70] + "…"
+    name = LANG_NAMES[res.alt_lang]
+    article = "an" if name[0] in "AEIOU" else "a"
+    return (f'<br><span style="color:{c["muted"]};font-size:9pt">Also {article} {name} word '
+            f'({escape(summary)}) — </span>'
+            + _lookup_as(res.alt_lang, res.query, f"look up as {LANG_NAMES[res.alt_lang]}"))
 
 
 def _message(text: str) -> str:
@@ -85,7 +117,7 @@ def english_html(res: LookupResult, pending: bool = False) -> str:
     if res.kind == "sentence":
         if res.language == "en":
             return f"<p style='font-size:13pt'>{escape(res.query)}</p>"
-        return translation_html(res, pending)
+        return translation_html(res, pending) + (gloss_html(res) if res.language == "tl" else "")
     if res.language == "zh":
         if not res.found:
             return not_found_html(res)
@@ -102,6 +134,8 @@ def english_html(res: LookupResult, pending: bool = False) -> str:
             out.append("</ol></p>")
         return "".join(out)
     if not res.senses_en:
+        if res.language == "tl":
+            return not_found_html(res) + translation_html(res, pending)
         if res.found:
             return _message("No English definitions offline — see the Chinese tab."
                             + (" Loading online definitions…" if pending else ""))
@@ -122,6 +156,8 @@ def chinese_html(res: LookupResult, pending: bool = False) -> str:
     c = colors()
     if not res.query:
         return ""
+    if res.language == "tl":
+        return _message("Chinese isn't available for Tagalog — see the English and Tagalog tabs.")
     if res.kind == "sentence":
         return translation_html(res, pending) + gloss_html(res)
     if res.language == "zh":
@@ -145,6 +181,52 @@ def chinese_html(res: LookupResult, pending: bool = False) -> str:
     return "".join(out)
 
 
+def tagalog_html(res: LookupResult, pending: bool = False) -> str:
+    c = colors()
+    if not res.query:
+        return ""
+    if res.language == "zh":
+        return _message("Tagalog is available for English and Tagalog input.")
+    if res.language == "tl":
+        if res.kind == "sentence" or not res.found:
+            return (f"<p style='font-size:13pt'>{escape(res.query)}</p>"
+                    + translation_html(res, pending) + gloss_html(res))
+        out = []
+        for e in res.tl_entries:
+            ipa = f' <span style="color:{c["muted"]}">/{escape(e.ipa)}/</span>' if e.ipa else ""
+            out.append(f'<p style="margin-bottom:2px"><span style="font-size:14pt;color:{c["tl"]}">'
+                       f'{escape(e.canonical)}</span> <i style="color:{c["pos"]}">{escape(e.pos)}</i>{ipa}</p>'
+                       '<ol style="margin-top:0">')
+            for gloss, tags in e.senses:
+                tag_html = (f' <span style="color:{c["muted"]};font-size:9pt">({escape(", ".join(tags))})</span>'
+                            if tags else "")
+                if e.lemma and gloss == e.lemma_note:
+                    body = escape(gloss.rsplit(" ", 1)[0]) + " " + _lookup_as("tl", e.lemma)
+                else:
+                    body = escape(gloss)
+                out.append(f'<li style="margin-bottom:3px">{body}{tag_html}</li>')
+            out.append("</ol>")
+            for tl, en in e.examples:
+                out.append(f'<p style="margin:0 0 6px 24px"><i>{escape(tl)}</i><br>'
+                           f'<span style="color:{c["muted"]}">{escape(en)}</span></p>')
+        return "".join(out)
+    # English input
+    if res.kind == "word" and res.meanings_tl:
+        rows = ["<table cellspacing='0' cellpadding='3'>"]
+        for word, gloss in res.meanings_tl:
+            rows.append(f'<tr><td style="font-size:13pt;padding-right:12px">{_lookup_as("tl", word)}</td>'
+                        f'<td style="color:{c["muted"]}">{escape(gloss)}</td></tr>')
+        rows.append("</table>")
+        return "".join(rows)
+    if res.translation_tl:
+        return f'<p style="font-size:13pt;color:{c["tl"]}">{escape(res.translation_tl)}</p>'
+    if res.translation_tl_error:
+        return _message(res.translation_tl_error)
+    if res.kind == "word" and res.found and not pending:
+        return _message("No Tagalog equivalent in the offline dictionary.")
+    return _message("Translating…" if pending else "No Tagalog translation.")
+
+
 def translation_html(res: LookupResult, pending: bool = False) -> str:
     c = colors()
     if res.translation:
@@ -163,9 +245,10 @@ def gloss_html(res: LookupResult) -> str:
     rows = [f'<p style="color:{c["muted"]};margin-bottom:2px">Word by word (offline):</p>'
             "<table cellspacing='0' cellpadding='2'>"]
     for tok, py, meaning in res.gloss:
-        if not py:
+        if not (py or meaning):
             continue
-        rows.append(f"<tr><td>{_lookup_link(tok)}</td>"
+        link = _lookup_as("tl", tok) if res.language == "tl" else _lookup_link(tok)
+        rows.append(f"<tr><td>{link}</td>"
                     f'<td style="color:{c["zh"]};padding:0 8px">{escape(py)}</td>'
                     f"<td>{escape(meaning)}</td></tr>")
     rows.append("</table>")
@@ -184,6 +267,13 @@ def examples_html(res: LookupResult, show_zh: bool, pending: bool = False) -> st
         return _message("No example sentences found.")
     out = []
     word = (res.headword or res.query).lower()
+    if res.language == "tl":
+        word = res.query.lower()
+        for ex in res.examples:
+            tl = _bold(escape(ex.tl or ""), escape(word))
+            en = f'<br><span style="color:{c["muted"]}">{escape(ex.en)}</span>' if show_zh else ""
+            out.append(f'<li style="margin-bottom:8px">{tl}{en}</li>')
+        return "<ul>" + "".join(out) + "</ul>"
     for ex in res.examples:
         en = escape(ex.en)
         if res.language == "en" and word:
@@ -204,7 +294,15 @@ def examples_html(res: LookupResult, show_zh: bool, pending: bool = False) -> st
     return "<ul>" + "".join(out) + "</ul>"
 
 
-def popup_html(res: LookupResult, pending: bool) -> str:
+def _bold(html_text: str, word: str) -> str:
+    lower, i, parts = html_text.lower(), 0, []
+    while word and (j := lower.find(word, i)) >= 0:
+        parts += [html_text[i:j], f"<b>{html_text[j:j + len(word)]}</b>"]
+        i = j + len(word)
+    return "".join(parts) + html_text[i:]
+
+
+def popup_html(res: LookupResult, pending: bool, show_tl: bool = True) -> str:
     """Compact body for the quick-lookup popup."""
     c = colors()
     out = []
@@ -223,6 +321,12 @@ def popup_html(res: LookupResult, pending: bool) -> str:
                        "<br>".join(f'<span style="color:{c["zh"]}">{escape(z)}</span>' for z in zh) + "</p>")
         if en:
             out.append("<p style='margin:4px 0 0 0'>" + "<br>".join(escape(e) for e in en) + "</p>")
+        tl = res.short_tl(4) if res.language == "en" and show_tl else []
+        if tl:
+            out.append(f"<p style='margin:4px 0 0 0'><span style='color:{c['muted']}'>Tagalog:</span> "
+                       + ", ".join(_lookup_as("tl", w) for w in tl) + "</p>")
+        if res.alt_lang:
+            out.append(alt_hint_html(res).removeprefix("<br>"))
         if not zh and not en:
             out.append(_message("Loading…" if pending else "No definition available."))
     elif res.kind == "word" and res.language == "en" and not res.translation:
@@ -232,7 +336,9 @@ def popup_html(res: LookupResult, pending: bool) -> str:
             out.append(_message("Checking online…"))
     else:
         q = res.query if len(res.query) < 220 else res.query[:220] + "…"
-        out.append(f'<span style="color:{c["muted"]}">{escape(q)}</span>')
+        badge = (f' <span style="color:{c["tl"]};font-size:8pt">Tagalog</span>'
+                 if res.language == "tl" else "")
+        out.append(f'<span style="color:{c["muted"]}">{escape(q)}</span>{badge}')
         out.append(translation_html(res, pending))
         if not res.translation and res.gloss:
             out.append(gloss_html(res))

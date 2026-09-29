@@ -1,14 +1,19 @@
-"""Offline dictionary lookup over the prebuilt dict.db (ECDICT + CC-CEDICT)."""
+"""Offline dictionary lookup over the prebuilt dict.db (ECDICT + CC-CEDICT + Wiktionary Tagalog)."""
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from pathlib import Path
 
-from .langdetect import detect_language, is_cjk, looks_like_single_term, normalize_query, tidy_sentence
-from .models import LookupResult, Sense, ZhEntry
+from .langdetect import (
+    TAGALOG_MARKERS, detect_language, is_cjk, latin_words, looks_like_single_term,
+    normalize_query, tagalog_markers, tidy_sentence,
+)
+from .models import Example, LookupResult, Sense, TlEntry, ZhEntry
 
 _EN_POS = {
     "n": "noun", "v": "verb", "vt": "verb", "vi": "verb", "a": "adjective",
@@ -26,6 +31,11 @@ _EXCHANGE_NAMES = {
     "3": "third-person singular", "r": "comparative", "t": "superlative",
     "s": "plural",
 }
+# Tagalog verb/noun affixes, used only as a weak hint for words in neither dictionary.
+_TL_MORPH = re.compile(r"^(nag|mag|pag|naka|maka|nakaka|ipag|pinag|pinaka|mang|nang|pang|ika)\w{3,}"
+                       r"|^\w{2,}(han|hin)$|^(\w)([aeiou])\3\4")
+_TL_SHOW_TAGS = {"obsolete", "archaic", "rare", "uncommon", "dated", "slang", "colloquial",
+                 "informal", "formal", "figuratively", "idiomatic", "vulgar", "derogatory"}
 _TAG_NAMES = {"zk": "中考", "gk": "高考", "cet4": "CET-4", "cet6": "CET-6",
               "ky": "考研", "toefl": "TOEFL", "ielts": "IELTS", "gre": "GRE"}
 
@@ -94,24 +104,61 @@ class Dictionary:
         self._con = sqlite3.connect(uri, uri=True, check_same_thread=False)
         self._lock = threading.Lock()
         self._t2s: dict[str, str] | None = None
+        self.has_tagalog = bool(self._q(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tagalog'"))
 
     def _q(self, sql: str, args: tuple = ()) -> list[tuple]:
         with self._lock:
             return self._con.execute(sql, args).fetchall()
 
     # ------------------------------------------------------------------ API
-    def lookup(self, raw: str) -> LookupResult:
+    def lookup(self, raw: str, lang: str | None = None) -> LookupResult:
+        """Look up `raw`. `lang` ("en"/"tl") overrides auto-detection for
+        Latin-script text; Chinese script is always treated as Chinese."""
         text = normalize_query(raw)
-        lang = detect_language(text)
-        if lang == "zh":
-            res = self.lookup_zh(text)
-        elif lang == "en":
-            res = self.lookup_en(text)
-        else:
+        script = detect_language(text)
+        if script == "unknown":
             return LookupResult(query=text, language="unknown", kind="word")
+        if script == "zh":
+            res = self.lookup_zh(text)
+        else:
+            if lang not in ("en", "tl"):
+                lang = self.detect_latin(text)
+            res = self.lookup_tl(text) if lang == "tl" else self.lookup_en(text)
         if res.kind == "sentence":
             res.query = res.headword = tidy_sentence(raw) or text
+        else:
+            self._add_cross_language(res)
         return res
+
+    def detect_latin(self, text: str) -> str:
+        """English or Tagalog? Scores each word against both dictionaries."""
+        words = latin_words(text)[:30]
+        if not self.has_tagalog or not words:
+            return "en"
+        en = tl = 0.0
+        tl += 2 * tagalog_markers(words)
+        for w in words:
+            if w in TAGALOG_MARKERS:
+                continue
+            plain = _strip_accents(w)
+            if plain != w:
+                tl += 1.0                       # stress marks (baháy) are a Tagalog giveaway
+            in_tl = bool(self._q("SELECT 1 FROM tagalog WHERE word = ? COLLATE NOCASE LIMIT 1", (plain,)))
+            row = self._q("SELECT frq, bnc, collins, oxford FROM ecdict WHERE word = ? COLLATE NOCASE "
+                          "LIMIT 1", (w,))
+            common_en = bool(row) and any(v and v > 0 for v in row[0])
+            if common_en:
+                en += 0.6 if in_tl else 1.5       # "said", "is" are also Tagalog words
+                tl += 0.3 if in_tl else 0
+            elif in_tl:
+                tl += 0.8 if row else 1.5        # rare English homographs lose to Tagalog
+                en += 0.3 if row else 0
+            elif row:
+                en += 1.0
+            elif _TL_MORPH.search(w):
+                tl += 0.5
+        return "tl" if tl > en else "en"
 
     def lookup_en(self, text: str) -> LookupResult:
         if not looks_like_single_term(text, "en"):
@@ -126,6 +173,90 @@ class Dictionary:
             kind = "word" if " " not in text else "sentence"
             return LookupResult(query=text, language="en", kind=kind, headword=text)
         return self._build_en(text, row)
+
+    def lookup_tl(self, text: str) -> LookupResult:
+        entries = self.tl_entries(text) if self.has_tagalog else []
+        if not entries:
+            kind = "word" if looks_like_single_term(text, "tl") and " " not in text else "sentence"
+            return LookupResult(query=text, language="tl", kind=kind, headword=text)
+        res = LookupResult(query=text, language="tl", kind="word", found=True,
+                           headword=entries[0].canonical or entries[0].word, tl_entries=entries)
+        res.senses_en = _tl_senses(entries)
+        base = next((e for e in entries if e.lemma), None)
+        if base:
+            res.lemma, res.inflection = base.lemma, base.lemma_note
+            only_forms = all(g == e.lemma_note for e in entries for g, _ in e.senses)
+            if only_forms:  # e.g. "kinain": show the root verb's meanings too
+                res.senses_en += _tl_senses(self.tl_entries(base.lemma))
+        for e in entries:
+            res.examples += [Example(en=en, tl=tl) for tl, en in e.examples]
+        return res
+
+    def tl_entries(self, word: str) -> list[TlEntry]:
+        sql = ("SELECT word, canonical, pos, ipa, senses, examples, lemma, lemma_note FROM tagalog "
+               "WHERE word = ? COLLATE NOCASE ORDER BY (word = ?) DESC, rowid")
+        rows = self._q(sql, (word, word))
+        if not rows:
+            plain = _strip_accents(word)
+            if plain != word:
+                rows = self._q(sql, (plain, plain))
+        out = []
+        for w, canon, pos, ipa, senses, examples, lemma, note in rows:
+            out.append(TlEntry(w, canon, pos, ipa,
+                               [(x["gloss"], x["tags"]) for x in json.loads(senses)],
+                               [tuple(x) for x in json.loads(examples)], lemma or "", note or ""))
+        # Alphabet-letter names ("ka" = the letter K) are rarely what a reader wants.
+        out.sort(key=lambda e: all(g.startswith("the name of the ") and "letter" in g
+                                   for g, _ in e.senses))
+        return out
+
+    def tagalog_for_english(self, word: str, limit: int = 8) -> list[tuple[str, str]]:
+        """English word -> [(Tagalog word, its gloss)], best first."""
+        if not self.has_tagalog:
+            return []
+        rows = self._q(
+            "SELECT tl, gloss FROM tl_rev WHERE en = ? AND substr(tl, 1, 1) != \"'\" "
+            "ORDER BY rank / 10, (rank % 10 >= 5), (rank % 10 > 0), -richness LIMIT ?",
+            (word.lower(), limit))
+        return [(t, g) for t, g in rows]
+
+    def gloss_tl(self, text: str) -> list[tuple[str, str, str]]:
+        """Word-by-word gloss of a Tagalog sentence: (token, "", first meaning)."""
+        out = []
+        for w in latin_words(text):
+            entries = self.tl_entries(w)
+            meaning = ""
+            for e in entries:
+                good = [g for g, _tags in e.senses if g != e.lemma_note]
+                if good:
+                    meaning = good[0]
+                    break
+            if not meaning and entries and entries[0].lemma:
+                meaning = entries[0].lemma_note
+            out.append((w, "", meaning))
+        return out
+
+    def _add_cross_language(self, res: LookupResult) -> None:
+        """English words get their Tagalog equivalents, and a hint when the same
+        spelling is also a word in the other Latin-script language."""
+        if not self.has_tagalog or res.language not in ("en", "tl"):
+            return
+        if res.language == "en":
+            word = res.headword or res.query
+            res.meanings_tl = self.tagalog_for_english(word)
+            if not res.meanings_tl and res.lemma:
+                res.meanings_tl = self.tagalog_for_english(res.lemma)
+            tl = self.tl_entries(res.query) if " " not in res.query else []
+            if tl:
+                res.alt_lang = "tl"
+                res.alt_summary = next((g for e in tl for g, _ in e.senses), "")
+        else:
+            row = self._ecdict_row(res.query)
+            common = row and self._q("SELECT 1 FROM ecdict WHERE word = ? COLLATE NOCASE AND "
+                                     "(frq > 0 OR bnc > 0 OR collins > 0) LIMIT 1", (res.query,))
+            if common and (row[3] or row[2]):
+                res.alt_lang = "en"
+                res.alt_summary = (row[3] or row[2]).splitlines()[0]
 
     def lookup_zh(self, text: str) -> LookupResult:
         entries = self.zh_entries(text)
@@ -180,10 +311,20 @@ class Dictionary:
             self._t2s = t2s
         return "".join(self._t2s.get(ch, ch) for ch in text)
 
-    def suggest(self, prefix: str, limit: int = 12) -> list[str]:
+    def suggest(self, prefix: str, limit: int = 12, lang: str | None = None) -> list[str]:
         prefix = normalize_query(prefix)
         if not prefix:
             return []
+        tl_words: list[str] = []
+        if self.has_tagalog and detect_language(prefix) != "zh" and lang != "en":
+            esc_tl = prefix.replace("%", r"\%").replace("_", r"\_")
+            tl_words = [r[0] for r in self._q(
+                "SELECT word FROM tagalog WHERE word LIKE ? ESCAPE '\\' AND pos != 'proper noun' "
+                "GROUP BY lower(word) ORDER BY (lower(word) != lower(?)), -max(richness), length(word) "
+                "LIMIT ?", (esc_tl + "%", prefix, limit if lang == "tl" else 3))]
+            if lang == "tl":
+                return tl_words
+            limit -= len(tl_words)
         if detect_language(prefix) == "zh":
             rows = self._q("SELECT DISTINCT simp FROM cedict WHERE simp LIKE ? "
                            "ORDER BY length(simp) LIMIT ?", (prefix + "%", limit))
@@ -193,7 +334,7 @@ class Dictionary:
             "SELECT word FROM (SELECT word, frq, bnc FROM ecdict WHERE word LIKE ? ESCAPE '\\' "
             "LIMIT 400) ORDER BY (frq = 0), frq, length(word) LIMIT ?", (esc + "%", limit))
         seen, out = set(), []
-        for (w,) in rows:
+        for w in [r[0] for r in rows] + tl_words:
             if w.lower() not in seen:
                 seen.add(w.lower())
                 out.append(w)
@@ -266,3 +407,23 @@ def _candidate_bases(word: str) -> list[str]:
     if w != word:
         cands.insert(0, w)
     return list(dict.fromkeys(c for c in cands if c))
+
+
+def _strip_accents(text: str) -> str:
+    """"baháy" -> "bahay" (Wiktionary headwords are stored without stress marks)."""
+    return "".join(ch for ch in unicodedata.normalize("NFD", text) if not unicodedata.combining(ch))
+
+
+def _tl_senses(entries: list[TlEntry]) -> list[Sense]:
+    senses: list[Sense] = []
+    for e in entries:
+        defs = []
+        for gloss, tags in e.senses:
+            shown = [t for t in tags if t in _TL_SHOW_TAGS]
+            defs.append(f"{gloss} ({', '.join(shown)})" if shown else gloss)
+        existing = next((x for x in senses if x.pos == e.pos), None)
+        if existing:
+            existing.definitions += defs
+        else:
+            senses.append(Sense(e.pos, defs))
+    return senses

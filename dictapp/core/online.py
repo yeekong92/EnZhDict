@@ -5,6 +5,7 @@ worker thread, never from the UI thread."""
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -88,8 +89,9 @@ def fetch_examples(word: str, lang: str = "en", db: UserDB | None = None, limit:
     key = f"tat:{lang}:{word.lower()}"
     if db and (hit := db.cache_get(key, CACHE_DAYS)) is not None:
         return [Example(**e) for e in hit]
-    src, tgt = ("eng", "cmn") if lang == "en" else ("cmn", "eng")
-    q = f"={word}" if lang == "en" and " " not in word else word
+    # English words get Chinese translations; Chinese and Tagalog words get English.
+    src, tgt = {"en": ("eng", "cmn"), "zh": ("cmn", "eng"), "tl": ("tgl", "eng")}[lang]
+    q = f"={word}" if lang in ("en", "tl") and " " not in word else word
     data = _get_json(TATOEBA_URL, lang=src, q=q, **{"trans:lang": tgt}, sort="relevance",
                      limit=limit * 2) or {}
     out: list[Example] = []
@@ -101,6 +103,8 @@ def fetch_examples(word: str, lang: str = "en", db: UserDB | None = None, limit:
         trans.sort(key=lambda t: (t.get("script") == "Hant", not t.get("is_direct", False)))
         if lang == "en":
             out.append(Example(en=s["text"], zh=trans[0]["text"]))
+        elif lang == "tl":
+            out.append(Example(en=trans[0]["text"], tl=s["text"]))
         else:
             out.append(Example(en=trans[0]["text"], zh=s["text"]))
         if len(out) >= limit:
@@ -136,17 +140,20 @@ def apply_dictionary(res: LookupResult, fd: dict | None) -> None:
 
 def apply_examples(res: LookupResult, examples: list[Example],
                    to_simplified: Callable[[str], str] | None = None) -> None:
-    seen = {e.en.lower(): e for e in res.examples}
+    def key(e: Example) -> str:
+        return (e.tl or e.en).lower()
+
+    seen = {key(e): e for e in res.examples}
     for ex in examples:
         if ex.zh and to_simplified:
-            ex = Example(ex.en, to_simplified(ex.zh))
-        if (old := seen.get(ex.en.lower())) is not None:
+            ex = replace(ex, zh=to_simplified(ex.zh))
+        if (old := seen.get(key(ex))) is not None:
             old.zh = old.zh or ex.zh
             continue
-        seen[ex.en.lower()] = ex
+        seen[key(ex)] = ex
         res.examples.append(ex)
     # Bilingual examples first — they're the most useful to learners.
-    res.examples.sort(key=lambda e: e.zh is None)
+    res.examples.sort(key=lambda e: not (e.zh or e.tl))
 
 
 def enrich(result: LookupResult, db: UserDB | None = None,

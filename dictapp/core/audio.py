@@ -20,7 +20,8 @@ from ..config import audio_cache_dir
 
 log = logging.getLogger(__name__)
 
-VOICES = {"uk": "en-GB-SoniaNeural", "us": "en-US-JennyNeural", "zh": "zh-CN-XiaoxiaoNeural"}
+VOICES = {"uk": "en-GB-SoniaNeural", "us": "en-US-JennyNeural", "zh": "zh-CN-XiaoxiaoNeural",
+          "tl": "fil-PH-BlessicaNeural"}
 
 
 def _cache_path(kind: str, key: str) -> Path:

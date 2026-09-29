@@ -1,4 +1,10 @@
-"""Language detection and query normalisation for English / Chinese input."""
+"""Language detection and query normalisation.
+
+Chinese is recognised by script. English and Tagalog share the Latin alphabet,
+so this module can only say "Latin" text is English-or-Tagalog; the Dictionary
+(core/lookup.py) makes the final call using both word lists plus the Tagalog
+function words below.
+"""
 from __future__ import annotations
 
 import re
@@ -10,7 +16,19 @@ _CJK_RANGES = (
     (0xF900, 0xFAFF),   # CJK Compatibility Ideographs
     (0x20000, 0x2FA1F), # Extensions B–F + compatibility supplement
 )
-_LATIN_WORD = re.compile(r"[A-Za-z]+(?:[-'’][A-Za-z]+)*")
+_LATIN_WORD = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[-'’][A-Za-zÀ-ÖØ-öø-ÿ]+)*")
+
+# Very frequent Tagalog words that are *not* English words. Their presence is
+# strong evidence for Tagalog. (Ambiguous ones like "at", "may", "pa", "na",
+# "si" are left out.)
+TAGALOG_MARKERS = frozenset("""
+ang ng mga nang ay sa ako ikaw ka siya kami tayo kayo sila ko mo niya namin natin ninyo nila
+akin iyo kanya amin atin inyo kanila hindi oo opo po ito iyan iyon yan yun yung dito diyan
+doon lang lamang din rin daw raw naman ba kasi pero kung para wala walang mayroon meron
+gusto ano sino saan kailan bakit paano ngayon bukas kahapon talaga sobra napaka nga nasa
+kay kina sina ni nina sige salamat mahal maganda magandang mabuti kumusta kamusta
+ating aming iba ibang isang dalawa tatlo marami konti kaunti lahat bawat baka sana siguro
+""".split())
 # Punctuation to trim from the ends of a selection (ASCII + CJK + quotes).
 _EDGE_PUNCT = " \t\r\n\"'`“”‘’«»()[]{}<>.,;:!?。，、；：！？（）【】《》「」『』…—-·*_#"
 
@@ -27,7 +45,7 @@ def detect_language(text: str) -> str:
     selections like ``用 Python 写`` should still be treated as Chinese text.
     """
     cjk = sum(1 for ch in text if is_cjk(ch))
-    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    latin = sum(1 for ch in text if ch.isalpha() and ord(ch) < 0x250)
     if cjk == 0 and latin == 0:
         return "unknown"
     # A Han character carries about as much as a 5-letter English word.
@@ -50,6 +68,14 @@ def normalize_query(text: str) -> str:
 def tidy_sentence(text: str) -> str:
     """Like normalize_query, but keeps sentence punctuation (only wrapping quotes go)."""
     return _clean(text).strip(" \"'`“”‘’«»()[]{}<>（）【】《》「」『』").strip()
+
+
+def latin_words(text: str) -> list[str]:
+    return [w.lower() for w in _LATIN_WORD.findall(text)]
+
+
+def tagalog_markers(words: list[str]) -> int:
+    return sum(1 for w in words if w in TAGALOG_MARKERS)
 
 
 def looks_like_single_term(text: str, lang: str | None = None) -> bool:

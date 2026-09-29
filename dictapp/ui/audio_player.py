@@ -13,6 +13,7 @@ _LOCALES = {
     "uk": (QLocale.English, QLocale.UnitedKingdom),
     "us": (QLocale.English, QLocale.UnitedStates),
     "zh": (QLocale.Chinese, QLocale.China),
+    "tl": (QLocale.Filipino, QLocale.Philippines),
 }
 
 

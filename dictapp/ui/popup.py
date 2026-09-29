@@ -26,7 +26,7 @@ class _MouseBridge(QObject):
 
 
 class Popup(QWidget):
-    open_in_main = Signal(str)
+    open_in_main = Signal(str, str)   # text, language
 
     def __init__(self, ctx: AppContext):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -40,6 +40,7 @@ class Popup(QWidget):
         self.result: LookupResult | None = None
         self._busy = False
         self._anchor = QPoint()
+        self._raw_text = ""
 
         frame = QFrame(objectName="popupFrame")
         outer = QVBoxLayout(self)
@@ -68,6 +69,11 @@ class Popup(QWidget):
         self.save_btn = QPushButton("☆ Save")
         self.save_btn.setFocusPolicy(Qt.NoFocus)
         self.save_btn.clicked.connect(self._save)
+        self.lang_btn = QPushButton()
+        self.lang_btn.setFocusPolicy(Qt.NoFocus)
+        self.lang_btn.setToolTip("Wrong language? Look this up as the other one")
+        self.lang_btn.clicked.connect(self._switch_language)
+        self.lang_btn.hide()
         more = QPushButton("More ↗")
         more.setToolTip("Open in the main window")
         more.setFocusPolicy(Qt.NoFocus)
@@ -81,6 +87,7 @@ class Popup(QWidget):
         close.clicked.connect(self.hide)
         row.addWidget(self.save_btn)
         row.addWidget(more)
+        row.addWidget(self.lang_btn)
         row.addWidget(self.status, 1)
         row.addWidget(close)
         lay.addLayout(row)
@@ -102,9 +109,11 @@ class Popup(QWidget):
         make_noactivate(int(self.winId()))
 
     # ------------------------------------------------------------ public
-    def show_for(self, text: str) -> None:
-        self._anchor = QCursor.pos()
-        res = self.session.start(text)
+    def show_for(self, text: str, lang: str | None = None, keep_anchor: bool = False) -> None:
+        if not keep_anchor:
+            self._anchor = QCursor.pos()
+        self._raw_text = text
+        res = self.session.start(text, lang)
         self._render(res)
         self._entered = False
         self._away_ms = 0
@@ -114,13 +123,14 @@ class Popup(QWidget):
         self._watch.start()
         self._start_mouse_listener()
         if self.ctx.settings.auto_play and res.kind == "word" and res.found:
-            self._play("zh" if res.language == "zh" else self.ctx.settings.default_accent)
+            self._play(res.language if res.language in ("zh", "tl") else self.ctx.settings.default_accent)
 
     def show_message(self, text: str) -> None:
         self._anchor = QCursor.pos()
         self.result = None
         self.body.setText(f"<span>{text}</span>")
         self.save_btn.setEnabled(False)
+        self.lang_btn.hide()
         self.status.clear()
         self._resize_and_place()
         self.show()
@@ -152,14 +162,21 @@ class Popup(QWidget):
 
     def _render(self, res: LookupResult) -> None:
         self.result = res
-        self.body.setText(render.popup_html(res, self._busy))
+        self.body.setText(render.popup_html(res, self._busy, self.ctx.settings.show_tagalog))
+        if res.language in ("en", "tl"):
+            self.lang_btn.setText("as English" if res.language == "tl" else "as Tagalog")
+            self.lang_btn.show()
+        else:
+            self.lang_btn.hide()
         self.save_btn.setEnabled(bool(res.query))
         self._refresh_save()
         self._resize_and_place()
 
     def _set_busy(self, busy: bool) -> None:
-        self._busy = busy
+        was_busy, self._busy = self._busy, busy
         self.status.setText("loading…" if busy else "")
+        if busy and not was_busy and self.result:
+            self._render(self.result)
         if not busy and self.result:
             if self.result.online_error and self.ctx.settings.online_lookups:
                 self.status.setText("offline")
@@ -200,7 +217,10 @@ class Popup(QWidget):
         if href.startswith("play:"):
             self._play(href[5:])
         elif href.startswith("lookup:"):
-            self.show_for(unquote(href[7:]))
+            self.show_for(unquote(href[7:]), keep_anchor=True)
+        elif href.startswith("lookupas:"):
+            lang, _, word = href[9:].partition(":")
+            self.show_for(unquote(word), lang, keep_anchor=True)
 
     def _play(self, accent: str) -> None:
         res = self.result
@@ -215,8 +235,13 @@ class Popup(QWidget):
 
     def _open_main(self) -> None:
         if self.result:
-            self.open_in_main.emit(self.result.query)
+            self.open_in_main.emit(self.result.query, self.result.language)
         self.hide()
+
+    def _switch_language(self) -> None:
+        if self.result and self.result.language in ("en", "tl"):
+            other = "en" if self.result.language == "tl" else "tl"
+            self.show_for(self._raw_text, other, keep_anchor=True)
 
     # ------------------------------------------------- auto-close logic
     def _distance_outside(self, p: QPoint) -> float:

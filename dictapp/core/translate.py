@@ -12,8 +12,8 @@ from ..data.userdb import UserDB
 
 log = logging.getLogger(__name__)
 
-_DT_CODES = {"en": "en", "zh": "zh-CN"}
-_MYMEMORY_CODES = {"en": "en-GB", "zh": "zh-CN"}
+_DT_CODES = {"en": "en", "zh": "zh-CN", "tl": "tl"}
+_MYMEMORY_CODES = {"en": "en-GB", "zh": "zh-CN", "tl": "tl-PH"}
 _COOLDOWN_S = 600
 _cooldown_until: dict[str, float] = {}  # engine -> time it may be retried
 
@@ -62,6 +62,7 @@ def translate(text: str, src: str, tgt: str, *, online: bool = True,
     if db and (hit := db.cache_get(key)) is not None:
         return hit["text"], hit["engine"]
     engines = ([("Google", _google), ("MyMemory", _mymemory)] if online else []) + [("Argos", _argos)]
+    empty_from: list[str] = []
     for name, fn in engines:
         if _cooldown_until.get(name, 0) > time.monotonic():
             continue
@@ -76,7 +77,10 @@ def translate(text: str, src: str, tgt: str, *, online: bool = True,
             if db:
                 db.cache_set(key, {"text": out, "engine": name})
             return out, name
-    if online:
+        empty_from.append(name)
+    if empty_from:
+        msg = f"{' and '.join(empty_from)} returned no translation for this text."
+    elif online:
         msg = "Translation unavailable (no internet, and no offline Argos model installed)."
     else:
         msg = "Online lookups are off and no offline Argos model is installed."

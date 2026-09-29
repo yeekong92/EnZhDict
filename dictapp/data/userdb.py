@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS entries (
     language    TEXT NOT NULL,
     meaning_en  TEXT DEFAULT '',
     meaning_zh  TEXT DEFAULT '',
+    meaning_tl  TEXT DEFAULT '',
     phonetic_uk TEXT DEFAULT '',
     phonetic_us TEXT DEFAULT '',
     pinyin      TEXT DEFAULT '',
@@ -27,7 +28,6 @@ CREATE TABLE IF NOT EXISTS entries (
     note        TEXT DEFAULT '',
     created_at  TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_entries_text ON entries(text COLLATE NOCASE, type);
 
 CREATE TABLE IF NOT EXISTS reviews (
     entry_id    INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
@@ -49,12 +49,13 @@ CREATE TABLE IF NOT EXISTS cache (
 );
 """
 
-ENTRY_COLS = ("id", "text", "type", "language", "meaning_en", "meaning_zh", "phonetic_uk",
-              "phonetic_us", "pinyin", "translation", "note", "created_at")
-EDITABLE = {"text", "meaning_en", "meaning_zh", "phonetic_uk", "phonetic_us", "pinyin",
-            "translation", "note"}
-CSV_COLS = ("text", "type", "language", "meaning_en", "meaning_zh", "phonetic_uk",
+ENTRY_COLS = ("id", "text", "type", "language", "meaning_en", "meaning_zh", "meaning_tl",
+              "phonetic_uk", "phonetic_us", "pinyin", "translation", "note", "created_at")
+EDITABLE = {"text", "meaning_en", "meaning_zh", "meaning_tl", "phonetic_uk", "phonetic_us",
+            "pinyin", "translation", "note"}
+CSV_COLS = ("text", "type", "language", "meaning_en", "meaning_zh", "meaning_tl", "phonetic_uk",
             "phonetic_us", "pinyin", "translation", "note", "created_at", "due")
+# Tagalog entries keep their IPA in phonetic_uk (there's no accent distinction).
 
 
 def utcnow() -> datetime:
@@ -80,6 +81,7 @@ class Entry:
     language: str
     meaning_en: str
     meaning_zh: str
+    meaning_tl: str
     phonetic_uk: str
     phonetic_us: str
     pinyin: str
@@ -107,7 +109,17 @@ class UserDB:
             self._con.execute("PRAGMA journal_mode=WAL")
             self._con.execute("PRAGMA foreign_keys=ON")
             self._con.executescript(SCHEMA)
+            self._migrate()
             self._con.commit()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self._con.execute("PRAGMA table_info(entries)")}
+        if "meaning_tl" not in cols:  # added with Tagalog support
+            self._con.execute("ALTER TABLE entries ADD COLUMN meaning_tl TEXT DEFAULT ''")
+        # The same spelling can be an English and a Tagalog word ("may"), so language is part of the key.
+        self._con.execute("DROP INDEX IF EXISTS ux_entries_text")
+        self._con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_entries_text_lang "
+                          "ON entries(text COLLATE NOCASE, type, language)")
 
     def close(self) -> None:
         with self._lock:
@@ -115,31 +127,36 @@ class UserDB:
 
     # ------------------------------------------------------------- entries
     def add_entry(self, *, text: str, type: str, language: str, meaning_en: str = "",
-                  meaning_zh: str = "", phonetic_uk: str = "", phonetic_us: str = "",
+                  meaning_zh: str = "", meaning_tl: str = "", phonetic_uk: str = "", phonetic_us: str = "",
                   pinyin: str = "", translation: str = "", note: str = "",
                   created_at: str | None = None, due: str | None = None) -> tuple[int, bool]:
         """Insert (or return existing) entry. Returns (id, created)."""
         text = text.strip()
         with self._lock:
             row = self._con.execute(
-                "SELECT id FROM entries WHERE text = ? COLLATE NOCASE AND type = ?",
-                (text, type)).fetchone()
+                "SELECT id FROM entries WHERE text = ? COLLATE NOCASE AND type = ? AND language = ?",
+                (text, type, language)).fetchone()
             if row:
                 return row["id"], False
             created = created_at or iso(utcnow())
             cur = self._con.execute(
-                "INSERT INTO entries (text, type, language, meaning_en, meaning_zh, phonetic_uk, "
-                "phonetic_us, pinyin, translation, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (text, type, language, meaning_en, meaning_zh, phonetic_uk, phonetic_us,
-                 pinyin, translation, note, created))
+                "INSERT INTO entries (text, type, language, meaning_en, meaning_zh, meaning_tl, "
+                "phonetic_uk, phonetic_us, pinyin, translation, note, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (text, type, language, meaning_en, meaning_zh, meaning_tl, phonetic_uk,
+                 phonetic_us, pinyin, translation, note, created))
             eid = cur.lastrowid
             self._con.execute("INSERT INTO reviews (entry_id, due, state) VALUES (?, ?, 1)",
                               (eid, due or iso(utcnow())))
             self._con.commit()
             return eid, True
 
-    def find_entry(self, text: str) -> Entry | None:
-        rows = self._select("WHERE e.text = ? COLLATE NOCASE", (text.strip(),))
+    def find_entry(self, text: str, language: str | None = None) -> Entry | None:
+        if language:
+            rows = self._select("WHERE e.text = ? COLLATE NOCASE AND e.language = ?",
+                                (text.strip(), language))
+        else:
+            rows = self._select("WHERE e.text = ? COLLATE NOCASE", (text.strip(),))
         return rows[0] if rows else None
 
     def get_entry(self, entry_id: int) -> Entry | None:
@@ -151,8 +168,8 @@ class UserDB:
             like = f"%{search}%"
             return self._select(
                 "WHERE e.text LIKE ? OR e.meaning_en LIKE ? OR e.meaning_zh LIKE ? "
-                "OR e.translation LIKE ? OR e.note LIKE ? ORDER BY e.created_at DESC",
-                (like,) * 5)
+                "OR e.meaning_tl LIKE ? OR e.translation LIKE ? OR e.note LIKE ? "
+                "ORDER BY e.created_at DESC", (like,) * 6)
         return self._select("ORDER BY e.created_at DESC")
 
     def update_entry(self, entry_id: int, **fields) -> None:
@@ -243,7 +260,7 @@ class UserDB:
                     typ = "word" if looks_like_single_term(text) else "sentence"
                 lang = (row.get("language") or "").strip() or detect_language(text)
                 fields = {k: (row.get(k) or "").strip() for k in
-                          ("meaning_en", "meaning_zh", "phonetic_uk", "phonetic_us", "pinyin",
+                          ("meaning_en", "meaning_zh", "meaning_tl", "phonetic_uk", "phonetic_us", "pinyin",
                            "translation", "note")}
                 created = (row.get("created_at") or "").strip() or None
                 due = (row.get("due") or "").strip() or None

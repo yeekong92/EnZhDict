@@ -19,6 +19,7 @@ from .context import AppContext
 
 COLUMNS = ["Item", "Type", "Meaning / Translation", "Note", "Date added", "Next review"]
 NOTE_COL = 3
+LANG_SHORT = {"en": "EN", "zh": "中文", "tl": "TL"}
 
 
 def _local(dt_iso: str | None) -> datetime | None:
@@ -72,7 +73,8 @@ class EntriesModel(QAbstractTableModel):
             if col == 0:
                 return e.text
             if col == 1:
-                return "Word" if e.type == "word" else "Sentence"
+                kind = "Word" if e.type == "word" else "Sentence"
+                return f"{kind} · {LANG_SHORT.get(e.language, e.language.upper())}"
             if col == 2:
                 return " ".join(e.meaning.split())[:200] if role == Qt.DisplayRole else e.meaning
             if col == 3:
@@ -129,6 +131,10 @@ class EditEntryDialog(QDialog):
                 add("phonetic_uk", "UK IPA")
                 add("phonetic_us", "US IPA")
                 add("meaning_zh", "Chinese meaning", True)
+                add("meaning_en", "English meaning", True)
+                add("meaning_tl", "Tagalog meaning", True)
+            elif entry.language == "tl":
+                add("phonetic_uk", "IPA")
                 add("meaning_en", "English meaning", True)
             else:
                 add("pinyin", "Pinyin")
@@ -221,7 +227,11 @@ class ReviewWidget(QWidget):
         self.rate_row.hide()
         self._render(back=False)
         if self.current.type == "word" and self.ctx.settings.auto_play:
-            self._play(self.ctx.settings.default_accent)
+            self._play(self._accent())
+
+    def _accent(self) -> str:
+        lang = self.current.language
+        return lang if lang in ("zh", "tl") else self.ctx.settings.default_accent
 
     def _render(self, back: bool) -> None:
         e = self.current
@@ -229,6 +239,8 @@ class ReviewWidget(QWidget):
         size = "26pt" if e.type == "word" else "16pt"
         html = [f"<div align='center' style='margin-top:30px'><p style='font-size:{size};font-weight:600'>"
                 f"{escape(e.text)}</p>"]
+        if e.language == "tl":
+            html.append(f"<p style='color:{c['tl']}'>Tagalog</p>")
         if back:
             if e.type == "word" and e.language == "en":
                 ph = []
@@ -238,11 +250,15 @@ class ReviewWidget(QWidget):
                               f'🔊 {acc.upper()}</a> <span style="color:{c["muted"]}">'
                               f'{"/" + escape(ipa) + "/" if ipa else ""}</span>')
                 html.append("<p>" + "&nbsp;&nbsp;&nbsp;".join(ph) + "</p>")
+            elif e.type == "word" and e.language == "tl":
+                ipa = f"/{escape(e.phonetic_uk)}/" if e.phonetic_uk else ""
+                html.append(f'<p><a href="play:tl" style="color:{c["accent"]};text-decoration:none">🔊</a> '
+                            f'<span style="color:{c["muted"]}">{ipa}</span></p>')
             elif e.type == "word":
                 html.append(f'<p><a href="play:zh" style="color:{c["accent"]};text-decoration:none">🔊</a> '
                             f'<span style="color:{c["zh"]};font-size:14pt">{escape(e.pinyin)}</span></p>')
             else:
-                acc = "zh" if e.language == "zh" else self.ctx.settings.default_accent
+                acc = self._accent()
                 html.append(f'<p><a href="play:{acc}" style="color:{c["accent"]};text-decoration:none">🔊 Listen</a></p>')
             html.append("</div><hr>")
             if e.type == "sentence":
@@ -251,7 +267,11 @@ class ReviewWidget(QWidget):
                 if e.meaning_zh:
                     html.append("<p style='font-size:13pt'>" + escape(e.meaning_zh).replace("\n", "<br>") + "</p>")
                 if e.meaning_en:
-                    html.append(f"<p style='color:{c['muted']}'>" + escape(e.meaning_en).replace("\n", "<br>") + "</p>")
+                    style = "font-size:13pt" if e.language == "tl" else f"color:{c['muted']}"
+                    html.append(f"<p style='{style}'>" + escape(e.meaning_en).replace("\n", "<br>") + "</p>")
+                if e.meaning_tl and self.ctx.settings.show_tagalog:
+                    html.append(f"<p><span style='color:{c['muted']}'>Tagalog:</span> "
+                                f"<span style='color:{c['tl']}'>{escape(e.meaning_tl)}</span></p>")
             if e.note:
                 html.append(f"<p style='background:{c['tag_bg']};padding:6px'>📝 {escape(e.note)}</p>")
         else:
@@ -268,7 +288,7 @@ class ReviewWidget(QWidget):
             b.setText(f"{name.title()}\n{preview.get(name, '')}")
         self.rate_row.show()
         if self.ctx.settings.auto_play and self.current.type == "sentence":
-            self._play("zh" if self.current.language == "zh" else self.ctx.settings.default_accent)
+            self._play(self._accent())
 
     def _key_rate(self, name: str) -> None:
         if self.rate_row.isVisible():
@@ -294,7 +314,7 @@ class ReviewWidget(QWidget):
 
 
 class SavedTab(QWidget):
-    lookup_requested = Signal(str)
+    lookup_requested = Signal(str, str)   # text, language
     due_count_changed = Signal(int)
 
     def __init__(self, ctx: AppContext, parent=None):
@@ -388,7 +408,7 @@ class SavedTab(QWidget):
     def _lookup_selected(self) -> None:
         sel = self._selected()
         if sel:
-            self.lookup_requested.emit(sel[0].text)
+            self.lookup_requested.emit(sel[0].text, sel[0].language)
 
     def edit_selected(self) -> None:
         sel = self._selected()

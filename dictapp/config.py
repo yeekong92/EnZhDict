@@ -66,6 +66,7 @@ class Settings:
     online_lookups: bool = True
     start_with_windows: bool = False
     show_example_translations: bool = False
+    show_tagalog: bool = True   # Tagalog equivalents for English words in the popup and reviews
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

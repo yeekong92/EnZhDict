@@ -55,14 +55,16 @@ class AppContext(QObject):
         self.settings_changed.emit()
 
     # ------------------------------------------------------------- lookup
-    def offline_lookup(self, text: str) -> LookupResult:
+    def offline_lookup(self, text: str, lang: str | None = None) -> LookupResult:
         if self.dictionary is None:
             from ..core.langdetect import detect_language, looks_like_single_term, normalize_query
             q = normalize_query(text)
             lang = detect_language(q)
             return LookupResult(query=q, language=lang,
                                 kind="word" if looks_like_single_term(q, lang) else "sentence")
-        res = self.dictionary.lookup(text)
+        res = self.dictionary.lookup(text, lang)
+        if res.language == "tl" and res.kind == "sentence":
+            res.gloss = self.dictionary.gloss_tl(res.query)
         if res.language == "zh" and res.kind == "sentence":
             for tok, entry in self.dictionary.segment_zh(res.query):
                 if entry:
@@ -74,7 +76,7 @@ class AppContext(QObject):
 
     # --------------------------------------------------------------- save
     def saved_entry(self, res: LookupResult):
-        return self.db.find_entry(self.save_text(res))
+        return self.db.find_entry(self.save_text(res), res.language)
 
     @staticmethod
     def save_text(res: LookupResult) -> str:
@@ -86,7 +88,10 @@ class AppContext(QObject):
             eid, created = self.db.add_entry(
                 text=self.save_text(res), type="word", language=res.language,
                 meaning_en=res.meaning_en_text(), meaning_zh=res.meaning_zh_text(),
-                phonetic_uk=res.phonetic_uk, phonetic_us=res.phonetic_us, pinyin=res.pinyin)
+                meaning_tl=res.meaning_tl_text() if res.language == "en" else "",
+                # Tagalog has one pronunciation; its IPA goes in the phonetic_uk column.
+                phonetic_uk=res.ipa if res.language == "tl" else res.phonetic_uk,
+                phonetic_us=res.phonetic_us, pinyin=res.pinyin)
         else:
             eid, created = self.db.add_entry(
                 text=res.query, type="sentence", language=res.language,
@@ -100,6 +105,7 @@ class AppContext(QObject):
         if not entry:
             return
         fresh = {"phonetic_uk": res.phonetic_uk, "phonetic_us": res.phonetic_us,
+                 "meaning_tl": res.meaning_tl_text() if res.language == "en" and entry.type == "word" else "",
                  "translation": res.translation if entry.type == "sentence" else "",
                  "meaning_en": res.meaning_en_text() if entry.type == "word" else ""}
         updates = {k: v for k, v in fresh.items() if v and not getattr(entry, k)}
@@ -123,26 +129,29 @@ class LookupSession(QObject):
         self.result: LookupResult | None = None
         self._token = 0
         self._pending = 0
+        self._tl_requested = False
 
-    def start(self, text: str) -> LookupResult:
+    def start(self, text: str, lang: str | None = None) -> LookupResult:
+        """`lang` forces "en" or "tl" for Latin-script text (None = auto-detect)."""
         self._token += 1
         token = self._token
         self._pending = 0
-        res = self.ctx.offline_lookup(text)
+        self._tl_requested = False
+        res = self.ctx.offline_lookup(text, lang)
         self.result = res
         self._emit()
         if not res.query:
             return res
         s = self.ctx.settings
         want_translation = res.kind == "sentence" or (res.kind == "word" and not res.found)
-        if want_translation and res.language in ("en", "zh"):
-            src, tgt = ("en", "zh") if res.language == "en" else ("zh", "en")
+        if want_translation and res.language in ("en", "zh", "tl"):
+            src, tgt = {"en": ("en", "zh"), "zh": ("zh", "en"), "tl": ("tl", "en")}[res.language]
             self._job(token, translate, res.query, src, tgt, online=s.online_lookups, db=self.ctx.db,
                       apply=self._apply_translation, fail=self._fail_translation)
         if res.kind == "word" and res.language == "en" and not res.found and self.ctx.dictionary:
             self._job(token, self.ctx.dictionary.did_you_mean, res.query,
                       apply=lambda r, v: setattr(r, "suggestions", v))
-        if s.online_lookups and res.kind == "word" and res.language in ("en", "zh"):
+        if s.online_lookups and res.kind == "word" and res.language in ("en", "zh", "tl"):
             if res.language == "en":
                 self._job(token, online.fetch_dictionary_for, copy.deepcopy(res), self.ctx.db,
                           apply=online.apply_dictionary, fail=self._fail_online)
@@ -151,13 +160,31 @@ class LookupSession(QObject):
                       apply=lambda r, v: online.apply_examples(r, v, t2s), fail=self._fail_online)
         return res
 
+    def ensure_tagalog(self) -> None:
+        """English input with no dictionary match in Tagalog: machine-translate it
+        (only when the Tagalog tab is actually opened, to save translation quota)."""
+        res = self.result
+        if (not res or res.language != "en" or res.meanings_tl or res.translation_tl
+                or self._tl_requested or not res.query):
+            return
+        self._tl_requested = True
+
+        def apply(r, v):
+            r.translation_tl, r.translation_tl_error = v[0], ""
+
+        def fail(r, e):
+            r.translation_tl_error = _friendly(e)
+
+        self._job(self._token, translate, res.query, "en", "tl",
+                  online=self.ctx.settings.online_lookups, db=self.ctx.db, apply=apply, fail=fail)
+
     def translate_examples(self, limit: int = 6) -> None:
         """Machine-translate examples that lack a Chinese translation."""
         res = self.result
-        if not res:
+        if not res or res.language == "tl":  # Tagalog examples already carry English
             return
         token = self._token
-        for i, ex in enumerate([e for e in res.examples if not e.zh][:limit]):
+        for ex in [e for e in res.examples if not e.zh][:limit]:
             def apply(r, v, en=ex.en):
                 for e in r.examples:
                     if e.en == en:

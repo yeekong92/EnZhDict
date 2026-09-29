@@ -44,6 +44,9 @@ class SettingsDialog(QDialog):
         self.online = QCheckBox("Use online lookups (audio, extra definitions, examples, translation)")
         self.online.setChecked(settings.online_lookups)
         form.addRow(self.online)
+        self.show_tl = QCheckBox("Show Tagalog equivalents for English words (popup and flashcards)")
+        self.show_tl.setChecked(settings.show_tagalog)
+        form.addRow(self.show_tl)
         self.startup = QCheckBox("Start with Windows (in the tray)")
         self.startup.setChecked(settings.start_with_windows)
         form.addRow(self.startup)
@@ -66,4 +69,5 @@ class SettingsDialog(QDialog):
             auto_play=self.auto_play.isChecked(),
             online_lookups=self.online.isChecked(),
             start_with_windows=self.startup.isChecked(),
+            show_tagalog=self.show_tl.isChecked(),
         )

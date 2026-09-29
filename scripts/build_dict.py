@@ -1,12 +1,14 @@
-"""Download ECDICT + CC-CEDICT and build the offline dictionary database.
+"""Download ECDICT + CC-CEDICT + Wiktionary Tagalog and build the offline dictionary database.
 
 Usage:
-    python scripts/build_dict.py              # download (if needed) and build resources/dict.db
-    python scripts/build_dict.py --ecdict path/to/ecdict.csv --cedict path/to/cedict.txt.gz
+    python scripts/build_dict.py                 # download (if needed) and build resources/dict.db
+    python scripts/build_dict.py --add-tagalog   # only add/refresh the Tagalog tables in an existing dict.db
+    python scripts/build_dict.py --ecdict ecdict.csv --cedict cedict.txt.gz --tagalog tagalog.jsonl
 
 Sources:
     ECDICT    https://github.com/skywind3000/ECDICT        (MIT)
     CC-CEDICT https://www.mdbg.net/chinese/dictionary?page=cedict  (CC BY-SA 4.0)
+    Tagalog   https://kaikki.org/dictionary/Tagalog/  (Wiktionary extract, CC BY-SA 4.0)
 """
 from __future__ import annotations
 
@@ -24,9 +26,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from dictapp.core.pinyin import numbered_to_marks  # noqa: E402
+from dictapp.data.tagalog_import import load_tagalog  # noqa: E402
 
 ECDICT_URL = "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv"
 CEDICT_URL = "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+TAGALOG_URL = "https://kaikki.org/dictionary/Tagalog/kaikki.org-dictionary-Tagalog.jsonl"
 RAW_DIR = ROOT / "resources" / "raw"
 OUT = ROOT / "resources" / "dict.db"
 
@@ -121,12 +125,33 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ecdict", type=Path, help="local ecdict.csv (skip download)")
     ap.add_argument("--cedict", type=Path, help="local cedict_1_0_ts_utf-8_mdbg.txt[.gz] (skip download)")
+    ap.add_argument("--tagalog", type=Path, help="local kaikki Tagalog .jsonl (skip download)")
+    ap.add_argument("--add-tagalog", action="store_true",
+                    help="only (re)build the Tagalog tables inside an existing dict.db")
     ap.add_argument("--out", type=Path, default=OUT)
     args = ap.parse_args()
+    t = time.time()
 
-    print("[1/3] Fetching sources")
+    if args.add_tagalog:
+        if not args.out.exists():
+            sys.exit(f"{args.out} doesn't exist yet - run without --add-tagalog first.")
+        tagalog = args.tagalog or download(TAGALOG_URL, RAW_DIR / "kaikki-tagalog.jsonl")
+        con = sqlite3.connect(args.out)
+        con.execute("DROP TABLE IF EXISTS tagalog")
+        con.execute("DROP TABLE IF EXISTS tl_rev")
+        n_tl, n_rev = load_tagalog(con, tagalog)
+        con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('tagalog_rows', ?)", (str(n_tl),))
+        con.commit()
+        con.close()
+        print(f"  {n_tl:,} Tagalog entries, {n_rev:,} English->Tagalog links")
+        print(f"Done in {time.time() - t:.0f}s -> {args.out}")
+        return
+
+    print("[1/4] Fetching sources")
     ecdict = args.ecdict or download(ECDICT_URL, RAW_DIR / "ecdict.csv")
     cedict = args.cedict or download(CEDICT_URL, RAW_DIR / "cedict_1_0_ts_utf-8_mdbg.txt.gz")
+    tagalog = args.tagalog or download(TAGALOG_URL, RAW_DIR / "kaikki-tagalog.jsonl")
 
     tmp_out = args.out.with_suffix(".building")
     tmp_out.unlink(missing_ok=True)
@@ -134,17 +159,19 @@ def main() -> None:
     con.execute("PRAGMA journal_mode=OFF")
     con.execute("PRAGMA synchronous=OFF")
 
-    t = time.time()
-    print("[2/3] Importing ECDICT ...")
+    print("[2/4] Importing ECDICT ...")
     n_ec = load_ecdict(con, ecdict)
     print(f"  {n_ec:,} English entries")
-    print("[3/3] Importing CC-CEDICT ...")
+    print("[3/4] Importing CC-CEDICT ...")
     n_ce = load_cedict(con, cedict)
     print(f"  {n_ce:,} Chinese entries")
+    print("[4/4] Importing Wiktionary Tagalog ...")
+    n_tl, n_rev = load_tagalog(con, tagalog)
+    print(f"  {n_tl:,} Tagalog entries, {n_rev:,} English->Tagalog links")
     con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
     con.executemany("INSERT INTO meta VALUES (?,?)", [
         ("built_at", time.strftime("%Y-%m-%d %H:%M:%S")),
-        ("ecdict_rows", str(n_ec)), ("cedict_rows", str(n_ce)),
+        ("ecdict_rows", str(n_ec)), ("cedict_rows", str(n_ce)), ("tagalog_rows", str(n_tl)),
     ])
     con.commit()
     con.execute("VACUUM")
